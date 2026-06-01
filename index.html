@@ -124,13 +124,32 @@
       color:var(--muted);
       font-size:14px;
     }
+
+    .auth-card{
+      background:#fff;
+      border:1px solid var(--border);
+      border-radius:16px;
+      padding:12px 14px;
+      margin:12px 0 14px;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      flex-wrap:wrap;
+      box-shadow:0 4px 14px rgba(0,0,0,.04);
+    }
+    .auth-info{color:var(--muted);font-size:14px;line-height:1.6}
+    .auth-info strong{color:var(--text)}
+    .sync-status{font-size:12px;color:var(--muted);margin-top:2px}
+    button.google{background:#fff;color:var(--main);border:1px solid var(--border)}
+
     @media(max-width:700px){.stats{grid-template-columns:1fr}.grid{grid-template-columns:repeat(auto-fill,minmax(70px,1fr))}}
   </style>
 </head>
 <body>
 <header>
   <h1>متابعة إنجاز القرآن الكريم</h1>
-  <p>اضغط على الصفحة عند إنجازها، وسيُحفظ تقدمك تلقائيًا على هذا الجهاز</p>
+  <p>اضغط على الصفحة عند إنجازها، وسجّل الدخول لحفظ تقدمك على كل أجهزتك</p>
 </header>
 
 <main class="container">
@@ -140,6 +159,19 @@
     <div class="stat"><div class="num" id="juzPercent">0%</div><div class="label" id="juzText">الأجزاء: 0 / 30</div></div>
   </section>
   <div class="bar"><span id="progressBar"></span></div>
+
+  <div class="auth-card">
+    <div class="auth-info">
+      <strong id="authTitle">لم يتم تسجيل الدخول</strong>
+      <div id="authSubtitle">سجّل الدخول بحساب Google لحفظ الإنجاز ومزامنته بين الهاتف والآيباد.</div>
+      <div class="sync-status" id="syncStatus">الحفظ المحلي يعمل الآن.</div>
+    </div>
+    <div>
+      <button class="google" id="loginBtn" onclick="signInWithGoogle()">تسجيل الدخول بـ Google</button>
+      <button class="secondary" id="logoutBtn" onclick="signOutUser()" style="display:none">تسجيل الخروج</button>
+    </div>
+  </div>
+
 
   <div class="tools">
     <input id="search" type="number" min="1" max="604" placeholder="اذهب إلى صفحة رقم..." />
@@ -151,6 +183,11 @@
   <div class="note">تنبيه: نسبة الصفحات لا تزيد إلا بعد إتمام الصفحة، ونسبة السور/الأجزاء لا تزيد إلا بعد اكتمال كل صفحات السورة/الجزء.</div>
   <section class="grid" id="pagesGrid"></section>
 </main>
+
+
+<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore-compat.js"></script>
 
 <script>
   const TOTAL_PAGES = 604;
@@ -191,9 +228,110 @@
     if(k !== STORAGE_KEY) localStorage.removeItem(k);
   });
 
+  const firebaseConfig = {
+    apiKey: "AIzaSyDwZJIG7Pr_9OujnF3D769mMhY5hVvroQg",
+    authDomain: "quran-progress-fdc8b.firebaseapp.com",
+    projectId: "quran-progress-fdc8b",
+    storageBucket: "quran-progress-fdc8b.firebasestorage.app",
+    messagingSenderId: "576918019036",
+    appId: "1:576918019036:web:3983d37227e3c9d4f38d19",
+    measurementId: "G-6BK6F1JVW5"
+  };
+
+  firebase.initializeApp(firebaseConfig);
+  const auth = firebase.auth();
+  const db = firebase.firestore();
+  const provider = new firebase.auth.GoogleAuthProvider();
+
+  let currentUser = null;
+  let cloudLoaded = false;
+  let saveTimer = null;
   let done = new Set(JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'));
 
-  function save(){ localStorage.setItem(STORAGE_KEY, JSON.stringify([...done])); }
+  function setSyncStatus(text){ document.getElementById('syncStatus').textContent = text; }
+
+  function save(){
+    localStorage.setItem(STORAGE_KEY, JSON.stringify([...done]));
+    if(currentUser && cloudLoaded){
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(saveToCloud, 500);
+    }
+  }
+
+  async function saveToCloud(){
+    if(!currentUser) return;
+    try{
+      setSyncStatus('جارٍ الحفظ على الحساب...');
+      await db.collection('users').doc(currentUser.uid).collection('progress').doc('quran').set({
+        pages: [...done].sort((a,b)=>a-b),
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+      }, {merge:true});
+      setSyncStatus('تم حفظ الإنجاز على حسابك.');
+    }catch(e){
+      console.error(e);
+      setSyncStatus('تعذر الحفظ السحابي. تحقق من إعدادات Firestore.');
+    }
+  }
+
+  async function loadFromCloud(user){
+    try{
+      setSyncStatus('جارٍ تحميل الإنجاز من حسابك...');
+      const ref = db.collection('users').doc(user.uid).collection('progress').doc('quran');
+      const snap = await ref.get();
+      const localPages = [...done];
+
+      if(snap.exists && Array.isArray(snap.data().pages)){
+        done = new Set(snap.data().pages.map(Number).filter(p => p >= 1 && p <= TOTAL_PAGES));
+        localStorage.setItem(STORAGE_KEY, JSON.stringify([...done]));
+        cloudLoaded = true;
+        render();
+        setSyncStatus('تم تحميل الإنجاز من حسابك.');
+      }else{
+        cloudLoaded = true;
+        done = new Set(localPages);
+        await saveToCloud();
+        render();
+        setSyncStatus('تم إنشاء حفظ سحابي جديد من إنجاز هذا الجهاز.');
+      }
+    }catch(e){
+      console.error(e);
+      cloudLoaded = false;
+      setSyncStatus('تعذر تحميل الإنجاز السحابي. تحقق من القواعد أو النطاق المسموح.');
+    }
+  }
+
+  function signInWithGoogle(){
+    auth.signInWithPopup(provider).catch(() => auth.signInWithRedirect(provider));
+  }
+
+  function signOutUser(){
+    auth.signOut();
+  }
+
+  auth.getRedirectResult().catch(console.error);
+
+  auth.onAuthStateChanged(user => {
+    currentUser = user;
+    const loginBtn = document.getElementById('loginBtn');
+    const logoutBtn = document.getElementById('logoutBtn');
+    const title = document.getElementById('authTitle');
+    const sub = document.getElementById('authSubtitle');
+
+    if(user){
+      loginBtn.style.display = 'none';
+      logoutBtn.style.display = 'inline-block';
+      title.textContent = 'تم تسجيل الدخول';
+      sub.textContent = user.displayName ? ('الحساب: ' + user.displayName) : 'الإنجاز محفوظ على حساب Google.';
+      loadFromCloud(user);
+    }else{
+      cloudLoaded = false;
+      loginBtn.style.display = 'inline-block';
+      logoutBtn.style.display = 'none';
+      title.textContent = 'لم يتم تسجيل الدخول';
+      sub.textContent = 'سجّل الدخول بحساب Google لحفظ الإنجاز ومزامنته بين الهاتف والآيباد.';
+      setSyncStatus('الحفظ المحلي يعمل الآن.');
+    }
+  });
 
   function getSurahForPage(page){
     let current = surahs[0];
